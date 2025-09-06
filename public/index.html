@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>KanbanGPT5</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand" title="KanbanGPT5">
+          <span class="logo">⧉</span>
+          <span class="brand-text">Kanban</span>
+        </div>
+        <div class="controls">
+          <div class="project-switcher">
+            <button id="current-project" class="btn ghost"></button>
+            <div id="project-menu" class="menu hidden"></div>
+          </div>
+          <button id="add-project" class="btn primary" title="New Project">＋</button>
+        </div>
+      </header>
+      <nav id="project-tabs" class="project-tabs"></nav>
+
+      <main class="layout">
+        <section class="board">
+          <div class="board-header">
+            <h1 id="board-title" class="h1"></h1>
+            <div class="board-actions">
+              <button id="add-column" class="btn ghost" title="Add Column">▥</button>
+            </div>
+          </div>
+
+          <div id="board-list" class="columns"></div>
+        </section>
+
+        <aside class="today">
+          <div id="today-dropzone" class="today-inner">
+            
+            <div class="pomodoro" id="pomodoro">
+              <div class="timer" style="display:flex;align-items:center;justify-content:center;gap:12px;">
+                <div class="time" id="timer-display" style="font-size:70px;text-align:center;">25:00</div>
+              </div>
+              <div class="timer-controls">
+                <button id="timer-start" class="icon-btn" title="Start" aria-label="Start">▶</button>
+                <button id="timer-pause" class="icon-btn" title="Pause" aria-label="Pause">⏸</button>
+                <button id="timer-skip" class="icon-btn" title="Skip" aria-label="Skip">⏭</button>
+                <button id="timer-reset" class="icon-btn" title="Reset" aria-label="Reset">↻</button>
+              </div>
+            </div>
+
+            <div class="today-drop-hint">TODAY</div>
+            <div id="today-list" class="card-list today-list" data-dropzone="today"></div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <template id="task-card-template">
+      <article class="card" draggable="true">
+        <div class="card-row compact">
+          <div class="card-title"></div>
+          <div class="card-time pill" title="Time spent">00:00:00</div>
+          <div class="card-actions">
+            <button class="icon-btn expand" title="Expand">▾</button>
+          </div>
+        </div>
+        <div class="card-details hidden">
+          <div class="detail-group">
+            <label>Due</label>
+            <div class="card-due"></div>
+          </div>
+          <div class="detail-group">
+            <label>Notes</label>
+            <div class="card-notes"></div>
+          </div>
+          <div class="detail-actions">
+            <button class="btn ghost edit">Edit</button>
+            <button class="btn danger delete">✕</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="modal-template">
+      <div class="modal-backdrop">
+        <div class="modal">
+          <div class="modal-header">
+            <h3 class="modal-title"></h3>
+            <button class="icon-btn close" title="Close">✕</button>
+          </div>
+          <div class="modal-body"></div>
+          <div class="modal-footer"></div>
+        </div>
+      </div>
+    </template>
+
+    <script src="./app.js" defer></script>
+  </body>
+  </html>
+
+
