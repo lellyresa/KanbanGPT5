@@ -130,6 +130,14 @@ svg.ring { display: none !important; }
   background: transparent;
   transition: transform 0.08s ease, color 0.12s ease;
 }
+.timer-controls .icon-btn.settings {
+  font-size: 26px;
+  margin-left: 4px;
+  opacity: 0.85;
+}
+.timer-controls .icon-btn.settings:hover {
+  opacity: 1;
+}
 /* Subtle feedback */
 .timer-controls .icon-btn:hover { color: #ffffff; }
 .timer-controls .icon-btn:active { transform: scale(0.92); color: var(--accent); }
@@ -285,5 +293,4 @@ svg.ring { display: none !important; }
   .layout { grid-template-columns: 1fr; }
   .today { position: sticky; top: 64px; }
 }
-
 

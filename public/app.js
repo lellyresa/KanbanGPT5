@@ -345,7 +345,7 @@ function createTaskCard(task, projectId, options = {}) {
       if (e.target.closest('.icon-btn') || e.target.closest('.btn')) return;
       pomodoroState.selectedTaskId = task.id;
       pomodoroState.selectedProjectId = projectId;
-      saveJson(StorageKeys.pomodoro, pomodoroState);
+      savePomodoroState();
       highlightSelectedTodayCard();
     });
     if (pomodoroState.selectedTaskId === task.id) node.classList.add('selected');
@@ -832,6 +832,64 @@ function openRenameColumnModal(projectId, columnId, currentName) {
   saveBtn.onclick = () => { const name = nameInput.value.trim(); if (!name) { nameInput.focus(); return; } renameColumn(projectId, columnId, name); modal.close(); };
 }
 
+function openPomodoroSettingsModal() {
+  const { wrap: focusWrap, input: focusInput } = inputField('Focus minutes', 'number', pomodoroSettings.focusMinutes);
+  const { wrap: shortWrap, input: shortBreakInput } = inputField('Short break minutes', 'number', pomodoroSettings.shortBreakMinutes);
+  const { wrap: longWrap, input: longBreakInput } = inputField('Long break minutes', 'number', pomodoroSettings.longBreakMinutes);
+  const { wrap: everyWrap, input: longEveryInput } = inputField('Long break every (focus cycles)', 'number', pomodoroSettings.longEvery);
+
+  [focusInput, shortBreakInput, longBreakInput, longEveryInput].forEach(input => {
+    input.min = '1';
+    input.step = '1';
+    input.inputMode = 'numeric';
+  });
+
+  function body() {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(focusWrap);
+    frag.appendChild(shortWrap);
+    frag.appendChild(longWrap);
+    frag.appendChild(everyWrap);
+    return frag;
+  }
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn ghost';
+  cancelBtn.textContent = 'Cancel';
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn primary';
+  saveBtn.textContent = 'Save';
+
+  const modal = openModal({ title: 'Pomodoro Settings', body, footer: [cancelBtn, saveBtn] });
+  cancelBtn.onclick = () => modal.close();
+  saveBtn.onclick = () => {
+    const nextSettings = normalizePomodoroSettings({
+      focusMinutes: focusInput.value,
+      shortBreakMinutes: shortBreakInput.value,
+      longBreakMinutes: longBreakInput.value,
+      longEvery: longEveryInput.value
+    });
+    const keys = ['focusMinutes', 'shortBreakMinutes', 'longBreakMinutes', 'longEvery'];
+    const changed = keys.some(key => nextSettings[key] !== pomodoroSettings[key]);
+    if (!changed) {
+      modal.close();
+      return;
+    }
+    pomodoroSettings = nextSettings;
+    pomodoroState.isRunning = false;
+    pomodoroState.startedAt = null;
+    pomodoroState.lastTickAt = null;
+    pomodoroState.remainingMs = totalMsForMode(pomodoroState.mode);
+    pomodoroState.remainingMsStart = pomodoroState.remainingMs;
+    cancelAnimationFrame(rafId);
+    savePomodoroState();
+    renderPomodoro();
+    modal.close();
+  };
+
+  setTimeout(() => focusInput.focus(), 0);
+}
+
 // Project menu toggle
 els.currentProjectBtn.addEventListener('click', () => {
   els.projectMenu.classList.toggle('hidden');
@@ -857,32 +915,70 @@ addColumnBtn.addEventListener('click', () => {
 });
 
 // Pomodoro timer
-const PomodoroDefaults = {
+const PomodoroSettingsDefaults = {
   focusMinutes: 25,
   shortBreakMinutes: 5,
   longBreakMinutes: 15,
   longEvery: 4
 };
 
-let pomodoroState = loadJson(StorageKeys.pomodoro, {
+function normalizePomodoroSettings(rawSettings) {
+  const defaults = PomodoroSettingsDefaults;
+  const clampInt = (value, fallback, min = 1) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < min) return fallback;
+    return Math.floor(n);
+  };
+  if (!rawSettings || typeof rawSettings !== 'object') {
+    return { ...defaults };
+  }
+  return {
+    focusMinutes: clampInt(rawSettings.focusMinutes, defaults.focusMinutes),
+    shortBreakMinutes: clampInt(rawSettings.shortBreakMinutes, defaults.shortBreakMinutes),
+    longBreakMinutes: clampInt(rawSettings.longBreakMinutes, defaults.longBreakMinutes),
+    longEvery: clampInt(rawSettings.longEvery, defaults.longEvery)
+  };
+}
+
+const storedPomodoro = loadJson(StorageKeys.pomodoro, null);
+let pomodoroSettings = normalizePomodoroSettings(storedPomodoro?.settings);
+
+const basePomodoroState = {
   mode: 'focus', // 'focus' | 'break'
   isRunning: false,
   startedAt: null,
-  remainingMs: PomodoroDefaults.focusMinutes * 60 * 1000,
+  remainingMs: pomodoroSettings.focusMinutes * 60 * 1000,
   cyclesCompleted: 0,
   selectedTaskId: null,
   selectedProjectId: null,
   lastTickAt: null,
   taskBaseTimeMs: 0,
-  taskStartedAt: null
-});
+  taskStartedAt: null,
+  remainingMsStart: null
+};
+
+let pomodoroState = { ...basePomodoroState, ...(storedPomodoro || {}) };
+delete pomodoroState.settings;
+if (!['focus', 'break'].includes(pomodoroState.mode)) {
+  pomodoroState.mode = 'focus';
+}
+if (typeof pomodoroState.remainingMs !== 'number' || !Number.isFinite(pomodoroState.remainingMs) || pomodoroState.remainingMs <= 0) {
+  pomodoroState.remainingMs = pomodoroSettings.focusMinutes * 60 * 1000;
+}
+
+function savePomodoroState() {
+  saveJson(StorageKeys.pomodoro, { ...pomodoroState, settings: pomodoroSettings });
+}
 
 // Hydrate/normalize timer state on load to avoid ghost-running sessions
 if (pomodoroState.isRunning) {
   pomodoroState.isRunning = false;
   pomodoroState.startedAt = null;
   pomodoroState.lastTickAt = null;
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  savePomodoroState();
+} else if (!storedPomodoro || !storedPomodoro.settings) {
+  // Persist normalized defaults so settings exist even for legacy state
+  savePomodoroState();
 }
 
 const ring = document.getElementById('ring-progress');
@@ -892,6 +988,7 @@ const startBtn = document.getElementById('timer-start');
 const pauseBtn = document.getElementById('timer-pause');
 const skipBtn = document.getElementById('timer-skip');
 const resetBtn = document.getElementById('timer-reset');
+const settingsBtn = document.getElementById('timer-settings');
 
 // Remove the visual timer ring entirely so only the digits remain
 const ringSvg = document.querySelector('.ring');
@@ -902,17 +999,22 @@ if (ringSvg && ringSvg.parentElement) {
 let rafId = null;
 
 function totalMsForMode(mode) {
-  if (mode === 'focus') return PomodoroDefaults.focusMinutes * 60 * 1000;
-  const isLong = pomodoroState.cyclesCompleted > 0 && (pomodoroState.cyclesCompleted % PomodoroDefaults.longEvery === 0);
-  return (isLong ? PomodoroDefaults.longBreakMinutes : PomodoroDefaults.shortBreakMinutes) * 60 * 1000;
+  if (mode === 'focus') {
+    return pomodoroSettings.focusMinutes * 60 * 1000;
+  }
+  const longEvery = Math.max(1, pomodoroSettings.longEvery);
+  const isLong = pomodoroState.cyclesCompleted > 0 && (pomodoroState.cyclesCompleted % longEvery === 0);
+  const breakMinutes = isLong ? pomodoroSettings.longBreakMinutes : pomodoroSettings.shortBreakMinutes;
+  return breakMinutes * 60 * 1000;
 }
 
 function setMode(mode) {
   pomodoroState.mode = mode;
   pomodoroState.remainingMs = totalMsForMode(mode);
+  pomodoroState.remainingMsStart = pomodoroState.remainingMs;
   pomodoroState.startedAt = null;
   pomodoroState.isRunning = false;
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  savePomodoroState();
   renderPomodoro();
 }
 
@@ -923,7 +1025,16 @@ function renderPomodoro() {
   const pct = 1 - (remaining / total);
   const dash = 339.292;
   if (ring) ring.style.strokeDashoffset = String(dash * pct);
-  if (timerMode) timerMode.textContent = pomodoroState.mode === 'focus' ? 'Focus' : 'Break';
+  if (timerMode) {
+    if (pomodoroState.mode === 'focus') {
+      timerMode.textContent = `Focus • ${pomodoroSettings.focusMinutes} min`;
+    } else {
+      const longEvery = Math.max(1, pomodoroSettings.longEvery);
+      const isLong = pomodoroState.cyclesCompleted > 0 && (pomodoroState.cyclesCompleted % longEvery === 0);
+      const minutes = isLong ? pomodoroSettings.longBreakMinutes : pomodoroSettings.shortBreakMinutes;
+      timerMode.textContent = `${isLong ? 'Long break' : 'Break'} • ${minutes} min`;
+    }
+  }
   timerDisplay.textContent = msToMMSS(remaining);
   updateSelectedTaskTimePill();
   updateRunningTimerHighlight();
@@ -941,7 +1052,7 @@ function tick() {
     const project = getProjectById(pomodoroState.selectedProjectId);
     const task = project?.tasks.find(t => t.id === pomodoroState.selectedTaskId);
     if (task) {
-      const base = pomodoroState.taskBaseTimeMs || (task.timeSpentMs || 0);
+      const base = (pomodoroState.taskBaseTimeMs ?? (task.timeSpentMs ?? 0));
       task.timeSpentMs = base + elapsedWholeSec * 1000;
       saveJson(StorageKeys.projects, projects);
     }
@@ -958,7 +1069,8 @@ function tick() {
     pomodoroState.isRunning = false;
     pomodoroState.startedAt = null;
     pomodoroState.remainingMs = totalMsForMode(pomodoroState.mode);
-    saveJson(StorageKeys.pomodoro, pomodoroState);
+    pomodoroState.remainingMsStart = pomodoroState.remainingMs;
+    savePomodoroState();
   }
   renderPomodoro();
   rafId = requestAnimationFrame(tick);
@@ -974,10 +1086,10 @@ startBtn.addEventListener('click', () => {
   if (pomodoroState.mode === 'focus' && pomodoroState.selectedTaskId && pomodoroState.selectedProjectId) {
     const project = getProjectById(pomodoroState.selectedProjectId);
     const task = project?.tasks.find(t => t.id === pomodoroState.selectedTaskId);
-    pomodoroState.taskBaseTimeMs = (task?.timeSpentMs || 0);
+    pomodoroState.taskBaseTimeMs = (task?.timeSpentMs ?? 0);
     pomodoroState.taskStartedAt = pomodoroState.startedAt;
   }
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  savePomodoroState();
   renderPomodoro();
   cancelAnimationFrame(rafId);
   rafId = requestAnimationFrame(tick);
@@ -992,7 +1104,7 @@ pauseBtn.addEventListener('click', () => {
     const task = project?.tasks.find(t => t.id === pomodoroState.selectedTaskId);
     if (task) pomodoroState.taskBaseTimeMs = task.timeSpentMs || 0;
   }
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  savePomodoroState();
   renderPomodoro();
   cancelAnimationFrame(rafId);
 });
@@ -1009,7 +1121,8 @@ skipBtn.addEventListener('click', () => {
   // reset task accumulation anchors when switching modes
   pomodoroState.taskBaseTimeMs = 0;
   pomodoroState.taskStartedAt = null;
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  pomodoroState.remainingMsStart = pomodoroState.remainingMs;
+  savePomodoroState();
   renderPomodoro();
 });
 
@@ -1017,9 +1130,16 @@ resetBtn.addEventListener('click', () => {
   pomodoroState.isRunning = false;
   pomodoroState.startedAt = null;
   pomodoroState.remainingMs = totalMsForMode(pomodoroState.mode);
-  saveJson(StorageKeys.pomodoro, pomodoroState);
+  pomodoroState.remainingMsStart = pomodoroState.remainingMs;
+  savePomodoroState();
   renderPomodoro();
 });
+
+if (settingsBtn) {
+  settingsBtn.addEventListener('click', () => {
+    openPomodoroSettingsModal();
+  });
+}
 
 function msToMMSS(ms) {
   const totalSec = Math.floor(ms / 1000);
@@ -1076,5 +1196,3 @@ function highlightSelectedTodayCard() {
   const card = document.querySelector(`#today-list .card[data-task-id="${pomodoroState.selectedTaskId}"]`);
   if (card) card.classList.add('selected');
 }
-
-
