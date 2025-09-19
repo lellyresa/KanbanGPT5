@@ -22,10 +22,21 @@ function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function debounce(fn, wait = 200) {
+  let timeoutId;
+  return (...args) => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), wait);
+  };
+}
+
 // Initial state
 let projects = loadJson(StorageKeys.projects, []);
 let activeProjectId = localStorage.getItem(StorageKeys.activeProjectId) || null;
 let todayTaskIds = loadJson(StorageKeys.today, []);
+let searchQuery = '';
+let searchQueryNormalized = '';
+let currentTaskInspector = null;
 
 if (projects.length === 0) {
   const demo = {
@@ -73,13 +84,58 @@ saveJson(StorageKeys.projects, projects);
 const els = {
   boardTitle: document.getElementById('board-title'),
   boardList: document.getElementById('board-list'),
+  boardArea: document.querySelector('.board'),
   todayList: document.getElementById('today-list'),
   todayDropzone: document.getElementById('today-dropzone'),
   addTask: document.getElementById('add-task'),
   addProject: document.getElementById('add-project'),
   currentProjectBtn: document.getElementById('current-project'),
-  projectMenu: document.getElementById('project-menu')
+  projectMenu: document.getElementById('project-menu'),
+  searchInput: document.getElementById('board-search')
 };
+
+const handleSearchInput = debounce((value) => {
+  searchQuery = value;
+  searchQueryNormalized = value.trim().toLowerCase();
+  renderBoard();
+  renderToday();
+}, 180);
+
+if (els.searchInput) {
+  const emitSearch = () => handleSearchInput(els.searchInput.value);
+  searchQuery = els.searchInput.value || '';
+  searchQueryNormalized = searchQuery.trim().toLowerCase();
+  els.searchInput.addEventListener('input', emitSearch);
+  els.searchInput.addEventListener('search', emitSearch);
+}
+
+if (els.boardArea) {
+  const handleBoardDragover = (ev) => {
+    const payload = dragPayload;
+    if (!payload?.fromToday) return;
+    if (eventTargetsColumn(ev)) {
+      ev.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+  };
+  const handleBoardDrop = (ev) => {
+    const transferData = ev.dataTransfer.getData('application/json') || ev.dataTransfer.getData('text/plain');
+    let parsed = null;
+    if (transferData) {
+      try { parsed = JSON.parse(transferData); } catch {}
+    }
+    const data = dragPayload || parsed;
+    if (!data?.fromToday) return;
+    if (eventTargetsColumn(ev)) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    removeTaskFromToday(data.taskId);
+  };
+  els.boardArea.addEventListener('dragover', handleBoardDragover);
+  els.boardArea.addEventListener('drop', handleBoardDrop);
+}
 
 function getProjectById(projectId) {
   return projects.find(p => p.id === projectId);
@@ -168,23 +224,62 @@ function renderProjectTabs() {
   wrap.appendChild(add);
 }
 
+function taskMatchesQuery(task) {
+  if (!searchQueryNormalized) return true;
+  const title = (task?.title || '').toLowerCase();
+  const notes = (task?.notes || '').toLowerCase();
+  return title.includes(searchQueryNormalized) || notes.includes(searchQueryNormalized);
+}
+
+function isInteractiveTarget(target) {
+  if (!target || !(target instanceof Element)) return false;
+  return Boolean(target.closest('button, .icon-btn, .pill-btn, a, input, textarea, select, label'));
+}
+
+function isInsideBoardColumn(target) {
+  if (!target) return false;
+  if (target instanceof Element) return Boolean(target.closest('.column'));
+  if (typeof Node !== 'undefined' && target instanceof Node && target.nodeType === Node.TEXT_NODE) {
+    const parent = target.parentElement;
+    if (parent) return Boolean(parent.closest('.column'));
+  }
+  return false;
+}
+
+function eventTargetsColumn(ev) {
+  return isPointerOverColumn(ev.clientX, ev.clientY);
+}
+
+function isPointerOverColumn(x, y) {
+  if (!els.boardList) return false;
+  const columns = Array.from(els.boardList.querySelectorAll('.column'));
+  return columns.some(col => {
+    const rect = col.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  });
+}
+
 function renderBoard() {
   const list = els.boardList;
   list.innerHTML = '';
   const boardTitle = els.boardTitle;
+  const activeQuery = searchQueryNormalized;
 
   if (activeProjectId === 'overview') {
     boardTitle.textContent = 'Overview';
     boardTitle.onclick = null; // disable rename on overview
     boardTitle.ondblclick = null;
     const pressing = getPressingTasksAcrossProjects();
+    const scoped = activeQuery ? pressing.filter(({ task }) => taskMatchesQuery(task)) : pressing;
     const col = document.createElement('div');
     col.className = 'column';
     const ch = document.createElement('div'); ch.className = 'column-header';
     const ct = document.createElement('div'); ct.className = 'column-title'; ct.textContent = 'Pressing';
     ch.appendChild(ct); col.appendChild(ch);
     const cards = document.createElement('div'); cards.className = 'card-list';
-    pressing.forEach(({ projectId, task }) => { cards.appendChild(createTaskCard(task, projectId)); });
+    scoped.forEach(({ projectId, task }) => {
+      cards.appendChild(createTaskCard(task, projectId, { matchesQuery: !!activeQuery }));
+    });
     col.appendChild(cards);
     list.appendChild(col);
   } else {
@@ -218,8 +313,9 @@ function renderBoard() {
 
       project.tasks
         .filter(t => t.columnId === col.id)
+        .filter(taskMatchesQuery)
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-        .forEach(task => listEl.appendChild(createTaskCard(task, project.id)));
+        .forEach(task => listEl.appendChild(createTaskCard(task, project.id, { matchesQuery: !!activeQuery })));
 
       colEl.appendChild(listEl);
       list.appendChild(colEl);
@@ -234,11 +330,20 @@ function renderToday() {
   const list = els.todayList;
   list.innerHTML = '';
   todayTaskIds = loadJson(StorageKeys.today, todayTaskIds);
+  const activeQuery = searchQueryNormalized;
   const tasks = getAllTasksFlat().filter(t => todayTaskIds.includes(t.task.id));
+  const tasksById = new Map();
+  tasks.forEach(entry => {
+    if (!activeQuery || taskMatchesQuery(entry.task)) {
+      tasksById.set(entry.task.id, entry);
+    }
+  });
   // Preserve explicit order based on todayTaskIds sequence
   todayTaskIds.forEach(id => {
-    const match = tasks.find(t => t.task.id === id);
-    if (match) list.appendChild(createTaskCard(match.task, match.projectId, { compact: true, inToday: true }));
+    const match = tasksById.get(id);
+    if (match) {
+      list.appendChild(createTaskCard(match.task, match.projectId, { compact: true, inToday: true, matchesQuery: !!activeQuery }));
+    }
   });
   enableDropzone(list, 'today');
   // Removed outer Today container as a drop target for a cleaner UX
@@ -259,13 +364,22 @@ function getPressingTasksAcrossProjects() {
   return withDue;
 }
 
+function removeTaskFromToday(taskId) {
+  todayTaskIds = todayTaskIds.filter(id => id !== taskId);
+  saveJson(StorageKeys.today, todayTaskIds);
+  renderToday();
+  highlightSelectedTodayCard();
+}
+
 // Card creation
 function createTaskCard(task, projectId, options = {}) {
-  const { compact = false, inToday = false } = options;
+  const { compact = false, inToday = false, matchesQuery = false } = options;
   const tpl = /** @type {HTMLTemplateElement} */ (document.getElementById('task-card-template'));
   const node = tpl.content.firstElementChild.cloneNode(true);
   node.dataset.taskId = task.id;
   node.dataset.projectId = projectId;
+  node.dataset.origin = inToday ? 'today' : 'board';
+  if (matchesQuery) node.classList.add('search-hit');
   node.querySelector('.card-title').textContent = task.title || 'Untitled';
   // Insert subtle priority dot next to title
   const titleEl = node.querySelector('.card-title');
@@ -308,13 +422,15 @@ function createTaskCard(task, projectId, options = {}) {
         // Animate, then remove from Today
         node.classList.add('removing');
         setTimeout(() => {
-          todayTaskIds = todayTaskIds.filter(id => id !== task.id);
-          saveJson(StorageKeys.today, todayTaskIds);
-          renderToday();
+          removeTaskFromToday(task.id);
         }, 160);
       });
       removeWrap.appendChild(removeBtn);
     }
+    node.addEventListener('dblclick', (ev) => {
+      if (isInteractiveTarget(ev.target)) return;
+      openTaskInspector(task.id, projectId);
+    });
   } else {
     // Restyle existing actions area to pill buttons on the right
     const actionsWrap = node.querySelector('.detail-actions');
@@ -332,8 +448,13 @@ function createTaskCard(task, projectId, options = {}) {
         deleteBtn.textContent = '✕';
       }
     }
-    editBtn.addEventListener('click', () => openTaskModal(projectId, task));
+    editBtn.addEventListener('click', () => openTaskInspector(task.id, projectId));
     deleteBtn.addEventListener('click', () => deleteTask(projectId, task.id));
+
+    node.addEventListener('click', (ev) => {
+      if (isInteractiveTarget(ev.target)) return;
+      openTaskInspector(task.id, projectId);
+    });
   }
 
   if (compact) {
@@ -394,6 +515,301 @@ function createTaskCard(task, projectId, options = {}) {
   return node;
 }
 
+
+function openTaskInspector(taskId, projectId) {
+  const project = getProjectById(projectId);
+  if (!project) return;
+  const task = project.tasks.find(t => t.id === taskId);
+  if (!task) return;
+
+  closeTaskInspector();
+
+  const columnName = project.columns.find(col => col.id === task.columnId)?.name || '—';
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'task-inspector-backdrop';
+  const inspector = document.createElement('div');
+  inspector.className = 'task-inspector';
+
+  const header = document.createElement('div');
+  header.className = 'task-inspector-header';
+  const headerTop = document.createElement('div');
+  headerTop.className = 'task-inspector-top';
+
+  const titleDisplay = document.createElement('h2');
+  titleDisplay.className = 'task-inspector-title';
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'task-inspector-title-input hidden';
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'task-inspector-title-wrap';
+  titleWrap.append(titleDisplay, titleInput);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'task-inspector-close';
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', 'Close task panel');
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => closeTaskInspector());
+
+  headerTop.append(titleWrap, closeBtn);
+  header.append(headerTop);
+
+  const meta = document.createElement('div');
+  meta.className = 'task-inspector-meta';
+  const addMeta = (label, value) => {
+    const pill = document.createElement('span');
+    pill.className = 'pill';
+    const strong = document.createElement('strong');
+    strong.textContent = label;
+    pill.appendChild(strong);
+    if (value instanceof Node) {
+      pill.appendChild(document.createTextNode(' '));
+      pill.appendChild(value);
+    } else {
+      pill.appendChild(document.createTextNode(` ${value}`));
+    }
+    meta.appendChild(pill);
+  };
+
+  addMeta('Project', project.name || '—');
+  addMeta('Column', columnName);
+
+  const priorityDisplay = document.createElement('span');
+  priorityDisplay.className = 'meta-value';
+  const prioritySelect = document.createElement('select');
+  prioritySelect.className = 'priority-select hidden';
+  for (const p of ['LOW', 'MEDIUM', 'HIGH']) {
+    const option = document.createElement('option');
+    option.value = p;
+    option.textContent = p;
+    prioritySelect.appendChild(option);
+  }
+  const priorityWrap = document.createElement('span');
+  priorityWrap.className = 'meta-priority';
+  priorityWrap.append(priorityDisplay, prioritySelect);
+  addMeta('Priority', priorityWrap);
+  addMeta('Time Tracked', msToHHMMSS(task.timeSpentMs || 0));
+
+  header.appendChild(meta);
+
+  const body = document.createElement('div');
+  body.className = 'task-inspector-body';
+
+  const createSection = (label, nodes) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'task-inspector-section';
+    const lab = document.createElement('label');
+    lab.textContent = label;
+    wrap.appendChild(lab);
+    if (Array.isArray(nodes)) {
+      nodes.forEach(node => wrap.appendChild(node));
+    } else if (nodes instanceof Node) {
+      wrap.appendChild(nodes);
+    } else {
+      const textEl = document.createElement('div');
+      textEl.className = 'task-inspector-value';
+      textEl.textContent = nodes;
+      wrap.appendChild(textEl);
+    }
+    return wrap;
+  };
+
+  const dueDisplay = document.createElement('div');
+  dueDisplay.className = 'task-inspector-value';
+  const dueInput = document.createElement('input');
+  dueInput.type = 'datetime-local';
+  dueInput.className = 'datetime hidden';
+  body.appendChild(createSection('Due', [dueDisplay, dueInput]));
+
+  const notesDisplay = document.createElement('div');
+  notesDisplay.className = 'task-inspector-notes';
+  const notesArea = document.createElement('textarea');
+  notesArea.className = 'textarea hidden';
+  body.appendChild(createSection('Notes', [notesDisplay, notesArea]));
+
+  const footer = document.createElement('div');
+  footer.className = 'task-inspector-footer';
+  const info = document.createElement('div');
+  info.className = 'task-inspector-info';
+  const actions = document.createElement('div');
+  actions.className = 'task-inspector-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn ghost hidden';
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = 'Cancel';
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'btn primary';
+  editBtn.type = 'button';
+  editBtn.textContent = 'Edit Task';
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'btn danger';
+  deleteBtn.type = 'button';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', () => {
+    closeTaskInspector();
+    deleteTask(projectId, task.id);
+  });
+
+  actions.append(cancelBtn, editBtn, deleteBtn);
+  footer.append(info, actions);
+
+  inspector.append(header, body, footer);
+  backdrop.appendChild(inspector);
+  document.body.appendChild(backdrop);
+  document.body.classList.add('body-lock-scroll');
+
+  const state = { editing: false, snapshot: null };
+
+  const syncFromTask = () => {
+    const title = task.title || 'Untitled';
+    titleDisplay.textContent = title;
+    titleInput.value = title;
+
+    const priorityValue = (task.priority || 'LOW').toUpperCase();
+    priorityDisplay.textContent = priorityValue;
+    prioritySelect.value = priorityValue;
+
+    const dueText = (() => {
+      if (!task.due) return 'No due date';
+      const d = new Date(task.due);
+      return Number.isNaN(d.getTime())
+        ? 'Invalid date'
+        : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    })();
+    dueDisplay.textContent = dueText;
+    if (task.due) {
+      dueInput.value = toLocalDatetime(task.due);
+    } else {
+      dueInput.value = '';
+    }
+
+    const trimmedNotes = (task.notes || '').trim();
+    notesDisplay.textContent = trimmedNotes || 'No notes yet.';
+    notesDisplay.classList.toggle('empty', !trimmedNotes);
+    notesArea.value = task.notes || '';
+
+    info.textContent = `Created ${formatRelativeDate(task.createdAt)}`;
+  };
+
+  const setEditing = (enabled) => {
+    state.editing = enabled;
+    titleDisplay.classList.toggle('hidden', enabled);
+    titleInput.classList.toggle('hidden', !enabled);
+    dueDisplay.classList.toggle('hidden', enabled);
+    dueInput.classList.toggle('hidden', !enabled);
+    notesDisplay.classList.toggle('hidden', enabled);
+    notesArea.classList.toggle('hidden', !enabled);
+    priorityDisplay.classList.toggle('hidden', enabled);
+    prioritySelect.classList.toggle('hidden', !enabled);
+    cancelBtn.classList.toggle('hidden', !enabled);
+    editBtn.textContent = enabled ? 'Save' : 'Edit Task';
+  };
+
+  syncFromTask();
+  setEditing(false);
+
+  cancelBtn.addEventListener('click', () => {
+    if (!state.editing) return;
+    if (state.snapshot) {
+      titleInput.value = state.snapshot.title;
+      notesArea.value = state.snapshot.notes;
+      dueInput.value = state.snapshot.due ? toLocalDatetime(state.snapshot.due) : '';
+      prioritySelect.value = state.snapshot.priority;
+    }
+    setEditing(false);
+    syncFromTask();
+    state.snapshot = null;
+  });
+
+  editBtn.addEventListener('click', () => {
+    if (!state.editing) {
+      state.snapshot = {
+        title: task.title || '',
+        notes: task.notes || '',
+        due: task.due || null,
+        priority: (task.priority || 'LOW').toUpperCase()
+      };
+      setEditing(true);
+      titleInput.focus();
+      titleInput.select();
+      return;
+    }
+
+    const trimmed = titleInput.value.trim();
+    if (!trimmed) {
+      titleInput.focus();
+      return;
+    }
+
+    task.title = trimmed;
+    task.notes = notesArea.value.trim();
+    const dueVal = dueInput.value;
+    task.due = dueVal ? new Date(dueVal).toISOString() : null;
+    task.priority = prioritySelect.value;
+    saveJson(StorageKeys.projects, projects);
+    renderBoard();
+    renderToday();
+    syncFromTask();
+    setEditing(false);
+    state.snapshot = null;
+  });
+
+  const onKeydown = (ev) => {
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      if (state.editing) {
+        cancelBtn.click();
+      } else {
+        closeTaskInspector();
+      }
+    }
+  };
+  document.addEventListener('keydown', onKeydown);
+
+  const onBackdropClick = (ev) => {
+    if (ev.target === backdrop) closeTaskInspector();
+  };
+  backdrop.addEventListener('click', onBackdropClick);
+
+  currentTaskInspector = {
+    backdrop,
+    onKeydown,
+    onBackdropClick
+  };
+
+  setTimeout(() => closeBtn.focus(), 0);
+}
+
+function closeTaskInspector() {
+  if (!currentTaskInspector) return;
+  const { backdrop, onKeydown, onBackdropClick } = currentTaskInspector;
+  if (backdrop?.parentElement) {
+    backdrop.removeEventListener('click', onBackdropClick);
+    backdrop.remove();
+  }
+  if (onKeydown) document.removeEventListener('keydown', onKeydown);
+  document.body.classList.remove('body-lock-scroll');
+  currentTaskInspector = null;
+}
+
+function formatRelativeDate(timestamp) {
+  if (!timestamp) return 'Unknown';
+  const now = Date.now();
+  const diffMs = now - Number(timestamp || 0);
+  if (!Number.isFinite(diffMs)) return 'Unknown';
+  const dayMs = 86400000;
+  if (diffMs < dayMs) return 'Today';
+  if (diffMs < dayMs * 2) return 'Yesterday';
+  const d = new Date(Number(timestamp));
+  return Number.isNaN(d.getTime())
+    ? 'Unknown'
+    : d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function formatDue(iso) {
   try {
     const d = new Date(iso);
@@ -413,11 +829,21 @@ function onDragStart(ev) {
   const el = ev.currentTarget;
   const taskId = el.dataset.taskId;
   const projectId = el.dataset.projectId;
-  dragPayload = { taskId, projectId };
+  const fromToday = el.dataset.origin === 'today';
+  dragPayload = { taskId, projectId, fromToday };
   ev.dataTransfer.effectAllowed = 'move';
-  ev.dataTransfer.setData('text/plain', JSON.stringify(dragPayload));
+  const payloadStr = JSON.stringify(dragPayload);
+  ev.dataTransfer.setData('text/plain', payloadStr);
+  try { ev.dataTransfer.setData('application/json', payloadStr); } catch {}
   el.classList.add('dragging');
-  document.querySelectorAll('[data-dropzone]').forEach(dz => dz.classList.add('highlight'));
+  document.querySelectorAll('[data-dropzone]').forEach(dz => {
+    const type = dz.dataset.dropzone;
+    if (fromToday) {
+      if (type === 'today') dz.classList.add('highlight'); else dz.classList.remove('highlight');
+    } else {
+      dz.classList.add('highlight');
+    }
+  });
 }
 function onDragEnd() {
   dragPayload = null;
@@ -429,6 +855,11 @@ function onDragEnd() {
 
 function enableDropzone(el, zone, meta = {}) {
   el.addEventListener('dragover', ev => {
+    const payload = dragPayload;
+    if (zone === 'column' && payload?.fromToday) {
+      ev.dataTransfer.dropEffect = 'none';
+      return;
+    }
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
     // Show insertion marker
@@ -438,7 +869,6 @@ function enableDropzone(el, zone, meta = {}) {
       const r = card.getBoundingClientRect();
       return ev.clientY < r.top + r.height / 2;
     });
-    // Remove existing marker
     containerEl.querySelectorAll('.drop-marker').forEach(m => m.remove());
     const marker = document.createElement('div');
     marker.className = 'drop-marker';
@@ -449,10 +879,20 @@ function enableDropzone(el, zone, meta = {}) {
     }
   });
   el.addEventListener('drop', ev => {
-    ev.preventDefault();
-    const data = dragPayload || JSON.parse(ev.dataTransfer.getData('text/plain'));
+    const transferData = ev.dataTransfer.getData('application/json') || ev.dataTransfer.getData('text/plain');
+    let parsed = null;
+    if (transferData) {
+      try { parsed = JSON.parse(transferData); } catch {}
+    }
+    const data = dragPayload || parsed;
     if (!data) return;
-    const { taskId, projectId } = data;
+    const { taskId, projectId, fromToday } = data;
+    el.querySelectorAll('.drop-marker').forEach(m => m.remove());
+    if (zone === 'column' && fromToday) {
+      ev.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    ev.preventDefault();
     if (zone === 'today') {
       // Reorder within Today by pointer position
       const containerEl = (el.id === 'today-dropzone') ? document.getElementById('today-list') : el;
@@ -561,7 +1001,8 @@ function addTask(projectId, task) {
     due: task.due || null,
     createdAt: Date.now(),
     pinned: !!task.pinned,
-    columnId
+    columnId,
+    priority: String(task.priority || 'LOW').toUpperCase()
   });
   saveJson(StorageKeys.projects, projects);
   renderBoard();
@@ -579,7 +1020,8 @@ function addTaskInColumn(projectId, columnId, task) {
     createdAt: Date.now(),
     pinned: !!task.pinned,
     columnId,
-    order: 0
+    order: 0,
+    priority: String(task.priority || 'LOW').toUpperCase()
   };
   inCol.forEach((t, i) => { t.order = i + 1; });
   project.tasks.unshift(newTask);
@@ -728,46 +1170,172 @@ function datetimeField(label, value = '') {
 }
 
 function openTaskModal(projectId, task = null, options = {}) {
-  const { defaultColumnId = null } = options || {};
-  const isEditing = !!task;
-  const { wrap: titleWrap, input: titleInput } = inputField('Title', 'text', task?.title || '');
-  const { wrap: notesWrap, ta: notesInput } = textareaField('Notes', task?.notes || '');
-  const { wrap: dueWrap, dt: dueInput } = datetimeField('Due', task?.due || '');
-
-  function body() {
-    const frag = document.createDocumentFragment();
-    frag.appendChild(titleWrap);
-    frag.appendChild(dueWrap);
-    frag.appendChild(notesWrap);
-    return frag;
+  if (task) {
+    openTaskInspector(task.id, projectId);
+    return;
   }
+  const { defaultColumnId = null } = options || {};
+  const project = getProjectById(projectId);
+  if (!project) return;
 
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'btn primary';
-  saveBtn.textContent = isEditing ? 'Save' : 'Create';
+  closeTaskInspector();
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'task-inspector-backdrop';
+  const inspector = document.createElement('div');
+  inspector.className = 'task-inspector';
+
+  const header = document.createElement('div');
+  header.className = 'task-inspector-header';
+  const headerTop = document.createElement('div');
+  headerTop.className = 'task-inspector-top';
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'task-inspector-title-input';
+  titleInput.placeholder = 'New task title';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'task-inspector-close';
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', 'Close create task');
+  closeBtn.textContent = '✕';
+
+  headerTop.append(titleInput, closeBtn);
+  header.append(headerTop);
+
+  const meta = document.createElement('div'); meta.className = 'task-inspector-meta';
+  const addMeta = (label, node) => {
+    const pill = document.createElement('span');
+    pill.className = 'pill';
+    const strong = document.createElement('strong');
+    strong.textContent = label;
+    pill.appendChild(strong);
+    if (node instanceof Node) {
+      pill.appendChild(document.createTextNode(' '));
+      pill.appendChild(node);
+    } else {
+      pill.appendChild(document.createTextNode(` ${node}`));
+    }
+    meta.appendChild(pill);
+  };
+
+  addMeta('Project', project.name || '—');
+
+  const columnSelect = document.createElement('select');
+  columnSelect.className = 'priority-select column-select';
+  (project.columns || []).forEach(col => {
+    const option = document.createElement('option');
+    option.value = col.id;
+    option.textContent = col.name;
+    columnSelect.appendChild(option);
+  });
+  if (defaultColumnId) columnSelect.value = defaultColumnId;
+  addMeta('Column', columnSelect);
+
+  const prioritySelect = document.createElement('select');
+  prioritySelect.className = 'priority-select';
+  ['LOW', 'MEDIUM', 'HIGH'].forEach(p => {
+    const option = document.createElement('option');
+    option.value = p;
+    option.textContent = p;
+    prioritySelect.appendChild(option);
+  });
+  addMeta('Priority', prioritySelect);
+
+  header.appendChild(meta);
+
+  const body = document.createElement('div');
+  body.className = 'task-inspector-body';
+
+  const dueInput = document.createElement('input');
+  dueInput.type = 'datetime-local';
+  dueInput.className = 'datetime';
+  const dueWrap = document.createElement('div'); dueWrap.className = 'task-inspector-section';
+  const dueLabel = document.createElement('label'); dueLabel.textContent = 'Due';
+  dueWrap.append(dueLabel, dueInput);
+
+  const notesArea = document.createElement('textarea');
+  notesArea.className = 'textarea';
+  const notesWrap = document.createElement('div'); notesWrap.className = 'task-inspector-section';
+  const notesLabel = document.createElement('label'); notesLabel.textContent = 'Notes';
+  notesWrap.append(notesLabel, notesArea);
+
+  body.append(dueWrap, notesWrap);
+
+  const footer = document.createElement('div');
+  footer.className = 'task-inspector-footer';
+  const info = document.createElement('div');
+  info.className = 'task-inspector-info';
+  info.textContent = project.name ? `Project ${project.name}` : '';
+  const actions = document.createElement('div'); actions.className = 'task-inspector-actions';
+
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn ghost';
+  cancelBtn.type = 'button';
   cancelBtn.textContent = 'Cancel';
 
-  const modal = openModal({ title: isEditing ? 'Edit Task' : 'New Task', body, footer: [cancelBtn, saveBtn] });
-  cancelBtn.onclick = () => modal.close();
-  saveBtn.onclick = () => {
-    const trimmedTitle = titleInput.value.trim();
-    if (!trimmedTitle) { titleInput.focus(); return; }
+  const createBtn = document.createElement('button');
+  createBtn.className = 'btn primary';
+  createBtn.type = 'button';
+  createBtn.textContent = 'Create';
+
+  actions.append(cancelBtn, createBtn);
+  footer.append(info, actions);
+
+  inspector.append(header, body, footer);
+  backdrop.appendChild(inspector);
+  document.body.appendChild(backdrop);
+  document.body.classList.add('body-lock-scroll');
+
+  const close = () => {
+    backdrop.removeEventListener('click', onBackdropClick);
+    document.removeEventListener('keydown', onKeydown);
+    backdrop.remove();
+    document.body.classList.remove('body-lock-scroll');
+    currentTaskInspector = null;
+  };
+
+  const onKeydown = (ev) => {
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      close();
+    }
+  };
+  const onBackdropClick = (ev) => {
+    if (ev.target === backdrop) close();
+  };
+
+  cancelBtn.addEventListener('click', close);
+  closeBtn.addEventListener('click', close);
+  backdrop.addEventListener('click', onBackdropClick);
+  document.addEventListener('keydown', onKeydown);
+
+  currentTaskInspector = { backdrop, onKeydown, onBackdropClick };
+
+  createBtn.addEventListener('click', () => {
+    const trimmed = titleInput.value.trim();
+    if (!trimmed) {
+      titleInput.focus();
+      return;
+    }
+    const dueVal = dueInput.value;
     const payload = {
-      title: trimmedTitle,
-      notes: notesInput.value.trim(),
-      due: dueInput.value ? new Date(dueInput.value).toISOString() : null
+      title: trimmed,
+      notes: notesArea.value.trim(),
+      due: dueVal ? new Date(dueVal).toISOString() : null,
+      priority: prioritySelect.value
     };
-    if (isEditing) {
-      updateTask(projectId, { ...task, ...payload });
-    } else if (defaultColumnId) {
-      addTaskInColumn(projectId, defaultColumnId, payload);
+    const targetColumn = columnSelect.value || project.columns?.[0]?.id;
+    if (targetColumn) {
+      addTaskInColumn(projectId, targetColumn, payload);
     } else {
       addTask(projectId, payload);
     }
-    modal.close();
-  };
+    close();
+  });
+
+  setTimeout(() => titleInput.focus(), 0);
 }
 
 function openProjectModal() {
