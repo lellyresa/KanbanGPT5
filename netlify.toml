@@ -1,0 +1,7 @@
+[[headers]]
+for = "/*"
+  [headers.values]
+  X-Frame-Options = "SAMEORIGIN"
+  X-Content-Type-Options = "nosniff"
+  Referrer-Policy = "same-origin"
+  Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
