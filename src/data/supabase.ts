@@ -36,6 +36,15 @@ export interface CreateTaskInput {
   title: string;
 }
 
+export interface MoveTaskInput {
+  projectId: string;
+  taskId: string;
+  fromColumnId: string;
+  toColumnId: string;
+  newOrderInFrom: string[];
+  newOrderInTo: string[];
+}
+
 export async function getMyLatestProject(): Promise<ProjectRecord | null> {
   const { data, error } = await supabase
     .from('projects')
@@ -105,18 +114,17 @@ export async function getBoard(projectId: string): Promise<BoardData> {
 }
 
 export async function createTask({ projectId, columnId, title }: CreateTaskInput): Promise<TaskRecord> {
-  const { data: existing, error: lookupError } = await supabase
+  const { count, error: countError } = await supabase
     .from('tasks')
-    .select('position')
-    .eq('column_id', columnId)
-    .order('position', { ascending: false })
-    .limit(1);
+    .select('id', { count: 'exact', head: true })
+    .eq('project_id', projectId)
+    .eq('column_id', columnId);
 
-  if (lookupError) {
-    throw wrapError('Unable to determine next task position', lookupError);
+  if (countError) {
+    throw wrapError('Unable to determine next task position', countError);
   }
 
-  const nextPosition = (existing?.[0]?.position ?? 0) + 1;
+  const nextPosition = (count ?? 0) + 1;
 
   const { data, error } = await supabase
     .from('tasks')
@@ -134,6 +142,57 @@ export async function createTask({ projectId, columnId, title }: CreateTaskInput
   }
 
   return data;
+}
+
+export async function resequenceColumn(
+  projectId: string,
+  columnId: string,
+  orderedTaskIds: string[],
+): Promise<void> {
+  for (let index = 0; index < orderedTaskIds.length; index++) {
+    const taskId = orderedTaskIds[index];
+    const { error } = await supabase
+      .from('tasks')
+      .update({ position: index + 1 })
+      .eq('id', taskId)
+      .eq('project_id', projectId)
+      .eq('column_id', columnId)
+      .select('id')
+      .single();
+
+    if (error) {
+      throw error;
+    }
+  }
+}
+
+export async function moveTask({
+  projectId,
+  taskId,
+  fromColumnId,
+  toColumnId,
+  newOrderInFrom,
+  newOrderInTo,
+}: MoveTaskInput): Promise<void> {
+  if (fromColumnId !== toColumnId) {
+    const { error } = await supabase
+      .from('tasks')
+      .update({ column_id: toColumnId })
+      .eq('id', taskId)
+      .eq('project_id', projectId)
+      .select('id')
+      .single();
+
+    if (error) {
+      throw error;
+    }
+  }
+
+  await resequenceColumn(projectId, fromColumnId, newOrderInFrom);
+
+  if (fromColumnId !== toColumnId) {
+    await resequenceColumn(projectId, toColumnId, newOrderInTo);
+  }
 }
 
 function wrapError(message: string, error: PostgrestError): Error {

@@ -140,6 +140,80 @@ body {
   box-shadow: 0 10px 25px -20px rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.3);
   font-weight: 500;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.board-task:focus-visible {
+  outline: 3px solid rgba(59, 130, 246, 0.55);
+  outline-offset: 2px;
+}
+
+.board-task.is-dragging {
+  transform: scale(1.02);
+  box-shadow: 0 18px 35px -18px rgba(15, 23, 42, 0.55);
+  border-color: rgba(59, 130, 246, 0.6);
+}
+
+.board-task.is-keyboard-dragging {
+  outline: 3px dashed rgba(59, 130, 246, 0.7);
+  outline-offset: 4px;
+}
+
+.board-column.is-drop-target {
+  border-color: rgba(59, 130, 246, 0.65);
+  box-shadow: 0 18px 38px -20px rgba(59, 130, 246, 0.35);
+  background: rgba(239, 246, 255, 0.75);
+}
+
+.board-task-drag-preview {
+  pointer-events: none;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: #ffffff;
+  border: 1px solid rgba(59, 130, 246, 0.5);
+  box-shadow: 0 22px 44px -22px rgba(15, 23, 42, 0.55);
+  opacity: 0.95;
+  transform: scale(1.02);
+}
+
+.toast-container {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  z-index: 1400;
+  pointer-events: none;
+}
+
+.toast {
+  background: #1d4ed8;
+  color: #ffffff;
+  border-radius: 0.75rem;
+  padding: 0.75rem 1rem;
+  box-shadow: 0 18px 30px -22px rgba(15, 23, 42, 0.55);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: auto;
+  font-weight: 500;
+}
+
+.toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast--error {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #fca5a5;
+}
+
+.toast--info {
+  background: #1d4ed8;
+  color: #ffffff;
 }
 
 .login-modal-overlay {
