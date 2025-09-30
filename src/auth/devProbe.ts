@@ -5,13 +5,16 @@ type ProbeResult = {
   error: Error | null;
 };
 
+// Make this module-scoped so the global augmentation is applied.
+export {};
+
 declare global {
   interface Window {
     _probe: () => Promise<ProbeResult>;
   }
 }
-export {}; // make this a module so the declaration merges
 
+// Guard so this file doesn't blow up during SSR / tests
 if (typeof window !== "undefined") {
   window._probe = async () => {
     console.log('[probe] querying boards…');
