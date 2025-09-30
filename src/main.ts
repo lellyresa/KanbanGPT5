@@ -1,11 +1,19 @@
 import './style.css';
 
 import { requireSession } from './auth/session';
-import type { BoardData } from './data/supabase';
-import { createStarterProject, getBoard, getMyLatestProject } from './data/supabase';
+import type { BoardData, ColumnRecord, ProjectRecord } from './data/supabase';
+import {
+  createProject,
+  createStarterProject,
+  getBoard,
+  getMyLatestProject,
+  getMyProjects,
+} from './data/supabase';
 import { mountPomodoro } from './features/pomodoro';
-import { renderBoard } from './ui/Board';
+import { renderBoard, type BoardController } from './ui/Board';
 import { mountDevAuthBadge } from './ui/DevAuthBadge';
+import { showProjectSwitcher } from './ui/ProjectSwitcher';
+import { mountOnboardingChecklist } from './ui/OnboardingChecklist';
 import { showToast } from './ui/toast';
 import { resolveErrorMessage } from './utils/errors';
 import './auth/devProbe';
@@ -19,17 +27,35 @@ interface SessionDetails {
 interface AppShellRefs {
   boardRoot: HTMLElement;
   pomodoroHost: HTMLElement;
-  projectChip: HTMLSpanElement;
+  projectButton: HTMLButtonElement;
   boardTitle: HTMLHeadingElement;
+  searchInput: HTMLInputElement;
+  filtersHost: HTMLDivElement;
+  newProjectButton: HTMLButtonElement;
 }
 
 let appShell: AppShellRefs | null = null;
+let currentBoard: BoardController | null = null;
+let detachColumnObserver: (() => void) | null = null;
+let pendingSearchQuery = '';
+let pendingColumnFilters: string[] | null = null;
+let sessionDetails: SessionDetails | null = null;
+let currentProject: ProjectRecord | null = null;
+let currentBoardData: BoardData | null = null;
+let onboardingHandle: { destroy: () => void } | null = null;
 
 export function bootApp(rootEl: HTMLDivElement, boardData: BoardData): void {
   const shell = ensureAppShell(rootEl);
-  shell.projectChip.textContent = boardData.project.name;
+  currentBoardData = boardData;
+  setActiveProject(boardData.project);
   shell.boardTitle.textContent = boardData.project.name;
-  renderBoard(shell.boardRoot, boardData);
+  detachColumnObserver?.();
+  detachColumnObserver = null;
+
+  currentBoard = renderBoard(shell.boardRoot, boardData);
+  applyPendingSearch(shell, currentBoard);
+  configureBoardFilters(shell, currentBoard);
+  mountOnboarding(boardData.project.id);
 }
 
 const appRoot = document.querySelector<HTMLDivElement>('#app');
@@ -44,6 +70,7 @@ void (async () => {
 
   try {
     const session = await requireSession();
+    sessionDetails = session;
 
     let project = null;
     try {
@@ -99,8 +126,15 @@ async function loadBoardIntoApp(
 
 function showEmptyState(rootEl: HTMLDivElement, session: SessionDetails): void {
   const shell = ensureAppShell(rootEl);
+  currentBoard = null;
+  currentBoardData = null;
+  teardownOnboarding();
+  detachColumnObserver?.();
+  detachColumnObserver = null;
+  shell.filtersHost.innerHTML = '';
   shell.boardTitle.textContent = 'Create your first board';
   shell.boardRoot.innerHTML = '';
+  setActiveProject(null);
 
   const emptyColumn = document.createElement('section');
   emptyColumn.className = 'column';
@@ -121,9 +155,18 @@ function showEmptyState(rootEl: HTMLDivElement, session: SessionDetails): void {
     void handleCreateFirstBoard(action, rootEl, session);
   });
 
+  const importButton = document.createElement('button');
+  importButton.type = 'button';
+  importButton.className = 'btn btn--ghost focus-ring';
+  importButton.textContent = 'Import board';
+  importButton.addEventListener('click', () => {
+    openProjectSwitcher();
+  });
+
   emptyColumn.appendChild(heading);
   emptyColumn.appendChild(message);
   emptyColumn.appendChild(action);
+  emptyColumn.appendChild(importButton);
   shell.boardRoot.appendChild(emptyColumn);
 }
 
@@ -155,8 +198,15 @@ async function handleCreateFirstBoard(
 
 function showError(rootEl: HTMLDivElement, message: string): void {
   const shell = ensureAppShell(rootEl);
+  currentBoard = null;
+  currentBoardData = null;
+  teardownOnboarding();
+  detachColumnObserver?.();
+  detachColumnObserver = null;
+  shell.filtersHost.innerHTML = '';
   shell.boardTitle.textContent = 'Something went wrong';
   shell.boardRoot.innerHTML = '';
+  setActiveProject(null);
   const errorEl = document.createElement('section');
   errorEl.className = 'column';
   errorEl.textContent = message;
@@ -204,24 +254,40 @@ function ensureAppShell(rootEl: HTMLDivElement): AppShellRefs {
   overviewChip.textContent = 'Overview';
   brandGroup.appendChild(overviewChip);
 
-  const projectChip = document.createElement('span');
-  projectChip.className = 'pill pill--active';
-  projectChip.dataset.projectChip = 'true';
-  projectChip.textContent = 'Project';
-  projectChip.setAttribute('aria-current', 'page');
-  brandGroup.appendChild(projectChip);
+  const projectButton = document.createElement('button');
+  projectButton.type = 'button';
+  projectButton.className = 'pill focus-ring';
+  projectButton.dataset.projectButton = 'true';
+  projectButton.textContent = 'Boards';
+  projectButton.setAttribute('aria-haspopup', 'dialog');
+  projectButton.setAttribute('aria-label', 'Open board switcher');
+  projectButton.addEventListener('click', openProjectSwitcher);
+  brandGroup.appendChild(projectButton);
 
   topbar.appendChild(brandGroup);
+
+  const searchGroup = document.createElement('div');
+  searchGroup.className = 'search-group';
+  topbar.appendChild(searchGroup);
 
   const search = document.createElement('input');
   search.type = 'search';
   search.placeholder = 'Search tasks';
   search.className = 'search focus-ring';
   search.setAttribute('aria-label', 'Search tasks');
-  topbar.appendChild(search);
+  search.value = pendingSearchQuery;
+  search.addEventListener('input', handleSearchInput);
+  search.addEventListener('search', handleSearchInput);
+  searchGroup.appendChild(search);
+
+  const filtersHost = document.createElement('div');
+  filtersHost.className = 'topbar-filters';
+  filtersHost.setAttribute('role', 'group');
+  filtersHost.setAttribute('aria-label', 'Filter columns');
+  searchGroup.appendChild(filtersHost);
 
   const actionsGroup = document.createElement('div');
-  actionsGroup.className = 'brand';
+  actionsGroup.className = 'topbar-actions';
 
   const newProjectButton = document.createElement('button');
   newProjectButton.type = 'button';
@@ -229,6 +295,7 @@ function ensureAppShell(rootEl: HTMLDivElement): AppShellRefs {
   newProjectButton.textContent = '+';
   newProjectButton.setAttribute('aria-label', 'Create project');
   newProjectButton.title = 'Create project';
+  newProjectButton.addEventListener('click', openProjectSwitcher);
   actionsGroup.appendChild(newProjectButton);
 
   topbar.appendChild(actionsGroup);
@@ -261,9 +328,237 @@ function ensureAppShell(rootEl: HTMLDivElement): AppShellRefs {
   appShell = {
     boardRoot,
     pomodoroHost: rightRail,
-    projectChip,
+    projectButton,
     boardTitle,
+    searchInput: search,
+    filtersHost,
+    newProjectButton,
   };
 
   return appShell;
+}
+
+function setActiveProject(project: ProjectRecord | null): void {
+  currentProject = project ?? null;
+  if (!appShell) {
+    return;
+  }
+
+  const { projectButton } = appShell;
+  if (project) {
+    projectButton.textContent = project.name;
+    projectButton.classList.add('pill--active');
+    projectButton.setAttribute(
+      'aria-label',
+      `Open board switcher. Current board: ${project.name}`,
+    );
+    projectButton.dataset.projectId = project.id;
+  } else {
+    projectButton.textContent = 'Boards';
+    projectButton.classList.remove('pill--active');
+    projectButton.setAttribute('aria-label', 'Open board switcher');
+    delete projectButton.dataset.projectId;
+  }
+}
+
+function handleSearchInput(event: Event): void {
+  const input = event.currentTarget as HTMLInputElement | null;
+  if (!input) {
+    return;
+  }
+
+  pendingSearchQuery = input.value;
+  currentBoard?.setSearchQuery(pendingSearchQuery);
+}
+
+function applyPendingSearch(shell: AppShellRefs, controller: BoardController): void {
+  shell.searchInput.value = pendingSearchQuery;
+  controller.setSearchQuery(pendingSearchQuery);
+}
+
+function configureBoardFilters(shell: AppShellRefs, controller: BoardController): void {
+  const host = shell.filtersHost;
+  const buttonByColumn = new Map<string, HTMLButtonElement>();
+  let allButton: HTMLButtonElement | null = null;
+
+  const toggleButtonState = (button: HTMLButtonElement | null, active: boolean) => {
+    if (!button) {
+      return;
+    }
+    button.classList.toggle('pill--active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  };
+
+  const updateActiveStates = () => {
+    const { columnIds } = controller.getFilterState();
+    const activeSet = new Set(columnIds);
+    const hasSpecific = activeSet.size > 0;
+    toggleButtonState(allButton, !hasSpecific);
+    buttonByColumn.forEach((button, columnId) => {
+      toggleButtonState(button, activeSet.has(columnId));
+    });
+  };
+
+  const handleAllClick = () => {
+    pendingColumnFilters = null;
+    controller.setColumnFilter(null);
+    const applied = controller.getFilterState().columnIds;
+    pendingColumnFilters = applied.length > 0 ? [...applied] : null;
+    updateActiveStates();
+  };
+
+  const handleColumnClick = (columnId: string) => {
+    const { columnIds } = controller.getFilterState();
+    const next = new Set(columnIds);
+    if (next.has(columnId)) {
+      next.delete(columnId);
+    } else {
+      next.add(columnId);
+    }
+    const updated = next.size > 0 ? Array.from(next) : null;
+    controller.setColumnFilter(updated);
+    const applied = controller.getFilterState().columnIds;
+    pendingColumnFilters = applied.length > 0 ? [...applied] : null;
+    updateActiveStates();
+  };
+
+  const buildButtons = (columns: ColumnRecord[]) => {
+    buttonByColumn.clear();
+    host.innerHTML = '';
+
+    allButton = document.createElement('button');
+    allButton.type = 'button';
+    allButton.className = 'pill focus-ring';
+    allButton.textContent = 'All columns';
+    allButton.setAttribute('aria-pressed', 'true');
+    allButton.addEventListener('click', handleAllClick);
+    host.appendChild(allButton);
+
+    columns.forEach((column) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'pill focus-ring';
+      button.textContent = column.title;
+      button.dataset.columnId = column.id;
+      button.setAttribute('aria-pressed', 'false');
+      button.addEventListener('click', () => handleColumnClick(column.id));
+      buttonByColumn.set(column.id, button);
+      host.appendChild(button);
+    });
+  };
+
+  const initialColumns = controller.getColumns();
+  buildButtons(initialColumns);
+  applyPendingColumnFilters(controller, initialColumns);
+  updateActiveStates();
+
+  detachColumnObserver?.();
+  detachColumnObserver = controller.onColumnsChange((columns) => {
+    buildButtons(columns);
+    applyPendingColumnFilters(controller, columns);
+    updateActiveStates();
+  });
+}
+
+function applyPendingColumnFilters(
+  controller: BoardController,
+  columns: ColumnRecord[],
+): void {
+  if (!pendingColumnFilters || pendingColumnFilters.length === 0) {
+    pendingColumnFilters = null;
+    controller.setColumnFilter(null);
+    return;
+  }
+
+  const allowed = new Set(columns.map((column) => column.id));
+  const next = pendingColumnFilters.filter((identifier) => allowed.has(identifier));
+
+  if (next.length === 0) {
+    pendingColumnFilters = null;
+    controller.setColumnFilter(null);
+    return;
+  }
+
+  controller.setColumnFilter(next);
+  const applied = controller.getFilterState().columnIds;
+  pendingColumnFilters = applied.length > 0 ? [...applied] : null;
+}
+
+function mountOnboarding(projectId: string): void {
+  if (!appShell || !currentBoard) {
+    return;
+  }
+
+  teardownOnboarding();
+  onboardingHandle = mountOnboardingChecklist(appShell.pomodoroHost, currentBoard, projectId);
+}
+
+function teardownOnboarding(): void {
+  onboardingHandle?.destroy();
+  onboardingHandle = null;
+}
+
+function openProjectSwitcher(): void {
+  if (!sessionDetails) {
+    showToast('Sign in to manage your boards.', 'error');
+    return;
+  }
+
+  if (!appRoot) {
+    return;
+  }
+
+  const { userId } = sessionDetails;
+  const activeProject = currentProject ?? currentBoardData?.project ?? null;
+
+  showProjectSwitcher({
+    currentProjectId: activeProject?.id,
+    loadProjects: async () => {
+      const projects = await getMyProjects(userId, 100);
+      if (activeProject && !projects.some((project) => project.id === activeProject.id)) {
+        return [activeProject, ...projects];
+      }
+      return projects;
+    },
+    onSelectProject: async (projectId) => {
+      if (!sessionDetails) {
+        throw new Error('Sign-in expired. Please refresh.');
+      }
+
+      const loaded = await loadBoardIntoApp(appRoot, projectId, sessionDetails);
+      if (!loaded) {
+        throw new Error('Unable to switch to that board right now.');
+      }
+      showToast('Board switched.', 'success');
+    },
+    onCreateProject: async ({ name, template }) => {
+      if (!sessionDetails) {
+        throw new Error('Sign-in expired. Please refresh.');
+      }
+
+      const trimmedName = name.trim() || 'Untitled board';
+      const project =
+        template === 'starter'
+          ? await createStarterProject(sessionDetails.userId, trimmedName)
+          : await createProject(sessionDetails.userId, trimmedName);
+
+      const loaded = await loadBoardIntoApp(appRoot, project.id, sessionDetails);
+      if (!loaded) {
+        throw new Error('Board created but failed to load. Try again.');
+      }
+      showToast('Board created.', 'success');
+      return project;
+    },
+    onImportProject: async (projectId) => {
+      if (!sessionDetails) {
+        throw new Error('Sign-in expired. Please refresh.');
+      }
+
+      const loaded = await loadBoardIntoApp(appRoot, projectId, sessionDetails);
+      if (!loaded) {
+        throw new Error('Unable to import that board. Check the ID and try again.');
+      }
+      showToast('Board loaded.', 'success');
+    },
+  });
 }
