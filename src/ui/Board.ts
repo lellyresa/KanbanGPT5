@@ -1,6 +1,9 @@
 import type { BoardData, ColumnRecord, TaskRecord } from '../data/supabase';
 import { createTask, getBoard, moveTask } from '../data/supabase';
 
+import { showTaskModal } from './taskModal';
+import { showToast } from './toast';
+
 interface ColumnState {
   column: ColumnRecord;
   tasks: TaskRecord[];
@@ -41,26 +44,21 @@ interface MoveResult {
   toIndex: number;
 }
 
-const TOAST_HOST_ID = 'board-toast-container';
-
 export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
   rootEl.innerHTML = '';
-  rootEl.classList.add('board-root');
 
   let boardState = buildBoardState(initialData);
   const columnLookup = new Map<string, ColumnState>();
   let columnOrder: string[] = [];
 
-  const boardTitle = document.createElement('h1');
-  boardTitle.className = 'board-title';
-  boardTitle.textContent = boardState.project.name;
-  rootEl.appendChild(boardTitle);
+  const boardTitleEl = rootEl.closest('.container')?.querySelector<HTMLHeadingElement>(
+    '.board-title',
+  );
+  if (boardTitleEl) {
+    boardTitleEl.textContent = boardState.project.name;
+  }
 
-  const boardEl = document.createElement('div');
-  boardEl.className = 'board-columns';
-  rootEl.appendChild(boardEl);
-
-  const toastHost = ensureToastHost();
+  const boardEl = rootEl as HTMLDivElement;
 
   let pointerDrag: PointerDragState | null = null;
   let keyboardDrag: KeyboardDragState | null = null;
@@ -79,12 +77,14 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
   }
 
   function renderColumns(): void {
-    boardTitle.textContent = boardState.project.name;
+    if (boardTitleEl) {
+      boardTitleEl.textContent = boardState.project.name;
+    }
     boardEl.innerHTML = '';
 
     if (boardState.columns.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'app-shell empty';
+      const empty = document.createElement('section');
+      empty.className = 'column';
       const heading = document.createElement('h2');
       heading.textContent = 'No columns yet';
       const copy = document.createElement('p');
@@ -98,7 +98,7 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
 
     for (const columnState of boardState.columns) {
       const columnEl = document.createElement('section');
-      columnEl.className = 'board-column';
+      columnEl.className = 'column';
       columnEl.dataset.columnId = columnState.column.id;
 
       columnEl.addEventListener('dragover', handleColumnDragOver);
@@ -106,25 +106,30 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
       columnEl.addEventListener('dragleave', handleColumnDragLeave);
       columnEl.addEventListener('drop', handleColumnDrop);
 
-      const header = document.createElement('header');
-      header.className = 'board-column-header';
+      const header = document.createElement('div');
+      header.className = 'column__title';
 
       const heading = document.createElement('h2');
       heading.id = `column-${columnState.column.id}`;
       heading.textContent = columnState.column.title;
       header.appendChild(heading);
 
+      const actions = document.createElement('div');
+      actions.className = 'column__actions';
+
       const addButton = document.createElement('button');
       addButton.type = 'button';
-      addButton.className = 'board-column-add';
-      addButton.textContent = '+ Add task';
+      addButton.className = 'icon-btn focus-ring';
+      addButton.textContent = '+';
+      addButton.setAttribute('aria-label', `Add task to ${columnState.column.title}`);
       addButton.addEventListener('click', () => handleAddTask(columnState.column, addButton));
 
-      header.appendChild(addButton);
+      actions.appendChild(addButton);
+      header.appendChild(actions);
       columnEl.appendChild(header);
 
       const taskList = document.createElement('ul');
-      taskList.className = 'board-task-list';
+      taskList.className = 'column__list';
       taskList.setAttribute('role', 'list');
       taskList.setAttribute('aria-labelledby', heading.id);
 
@@ -141,19 +146,43 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
     }
   }
 
+  function renderBoardSkeleton(target: HTMLElement, columnCount = 3): void {
+    target.innerHTML = '';
+    for (let index = 0; index < columnCount; index++) {
+      const column = document.createElement('section');
+      column.className = 'column';
+      column.style.minHeight = '200px';
+      target.appendChild(column);
+    }
+  }
+
   function renderTaskList(columnState: ColumnState, taskList: HTMLUListElement): void {
     taskList.innerHTML = '';
 
     columnState.tasks.forEach((task) => {
       const item = document.createElement('li');
-      item.className = 'board-task';
+      item.className = 'task focus-ring';
       item.draggable = true;
       item.tabIndex = 0;
       item.dataset.taskId = task.id;
       item.dataset.columnId = columnState.column.id;
       item.setAttribute('role', 'listitem');
       item.setAttribute('aria-grabbed', keyboardDrag?.taskId === task.id ? 'true' : 'false');
-      item.textContent = task.title;
+
+      const title = document.createElement('span');
+      title.className = 'task__title';
+      title.textContent = task.title;
+      item.appendChild(title);
+
+      const meta = document.createElement('div');
+      meta.className = 'task__meta';
+
+      const timerChip = document.createElement('span');
+      timerChip.className = 'chip chip--timer';
+      timerChip.textContent = '00:00:00';
+      meta.appendChild(timerChip);
+
+      item.appendChild(meta);
 
       if (keyboardDrag?.taskId === task.id) {
         item.classList.add('is-dragging', 'is-keyboard-dragging');
@@ -168,12 +197,17 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
   }
 
   async function handleAddTask(column: ColumnRecord, button: HTMLButtonElement): Promise<void> {
-    const taskTitle = window.prompt('Task title');
-    if (!taskTitle) {
+    let modalResult: Awaited<ReturnType<typeof showTaskModal>> | null = null;
+    try {
+      modalResult = await showTaskModal({ columnTitle: column.title });
+    } catch (error) {
+      if (error instanceof Error && error.message !== 'Task creation cancelled.') {
+        showToast(resolveErrorMessage(error, 'Unable to open task creator.'), 'error');
+      }
       return;
     }
 
-    const trimmedTitle = taskTitle.trim();
+    const trimmedTitle = modalResult?.title.trim();
     if (!trimmedTitle) {
       return;
     }
@@ -187,9 +221,11 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
         projectId: boardState.project.id,
         columnId: column.id,
         title: trimmedTitle,
+        description: modalResult?.description,
       });
 
-      await refreshBoardState();
+      await refreshBoardState(false);
+      showToast('Task created.', 'success');
     } catch (error) {
       const message = resolveErrorMessage(error, 'Failed to create task.');
       showToast(message, 'error');
@@ -199,11 +235,22 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
     }
   }
 
-  async function refreshBoardState(): Promise<void> {
-    const fresh = await getBoard(boardState.project.id);
-    boardState = buildBoardState(fresh);
-    rebuildColumnLookup();
-    renderColumns();
+  async function refreshBoardState(showLoading = true): Promise<void> {
+    if (showLoading && boardTitleEl) {
+      boardTitleEl.textContent = 'Loading board…';
+      renderBoardSkeleton(boardEl, Math.max(boardState.columns.length, 3));
+    }
+
+    try {
+      const fresh = await getBoard(boardState.project.id);
+      boardState = buildBoardState(fresh);
+      rebuildColumnLookup();
+    } catch (error) {
+      showToast(resolveErrorMessage(error, 'Unable to refresh board.'), 'error');
+      console.error('Unable to refresh board', error);
+    } finally {
+      renderColumns();
+    }
   }
 
   function handleTaskDragStart(event: DragEvent): void {
@@ -317,7 +364,7 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
       return;
     }
 
-    const list = columnEl.querySelector<HTMLUListElement>('.board-task-list');
+    const list = columnEl.querySelector<HTMLUListElement>('.column__list');
     const dropIndex = getDropIndex(list, event.clientY, pointerDrag.taskId);
 
     void finalizePointerDrop(pointerDrag, columnId, dropIndex);
@@ -447,7 +494,7 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
 
     if (!keyboardHintShown) {
       keyboardHintShown = true;
-      showToast('Use arrow keys to move, Space to drop, Escape to cancel.', 'info', 2600, true);
+      showToast('Use arrow keys to move, Space to drop, Escape to cancel.', 'success', 2600);
     }
   }
 
@@ -471,7 +518,8 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
       return;
     }
 
-    const { taskId, fromColumnId, fromIndex, currentColumnId, currentIndex, snapshot } = keyboardDrag;
+    const { taskId, fromColumnId, fromIndex, currentColumnId, currentIndex, snapshot } =
+      keyboardDrag;
     keyboardDrag = null;
     rootEl.classList.remove('is-keyboard-dragging');
     setDropTarget(null);
@@ -561,7 +609,11 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
     focusTask(taskId);
   }
 
-  function moveTaskInState(taskId: string, targetColumnId: string, requestedIndex: number): MoveResult | null {
+  function moveTaskInState(
+    taskId: string,
+    targetColumnId: string,
+    requestedIndex: number,
+  ): MoveResult | null {
     const task = boardState.taskById.get(taskId);
     if (!task) {
       return null;
@@ -668,7 +720,7 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
       return 0;
     }
 
-    const items = Array.from(list.querySelectorAll<HTMLLIElement>('.board-task'));
+    const items = Array.from(list.querySelectorAll<HTMLLIElement>('.task'));
     let index = 0;
 
     for (const item of items) {
@@ -723,7 +775,9 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
     }
 
     if (activeDropColumnId) {
-      const previous = rootEl.querySelector<HTMLElement>(`[data-column-id="${activeDropColumnId}"]`);
+      const previous = rootEl.querySelector<HTMLElement>(
+        `[data-column-id="${activeDropColumnId}"]`,
+      );
       previous?.classList.remove('is-drop-target');
     }
 
@@ -737,7 +791,7 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
 
   function createDragPreview(taskEl: HTMLLIElement): HTMLElement | null {
     const clone = taskEl.cloneNode(true) as HTMLElement;
-    clone.classList.add('board-task-drag-preview');
+    clone.classList.add('task', 'task--preview', 'board-task-drag-preview');
     clone.style.position = 'absolute';
     clone.style.top = '-9999px';
     clone.style.left = '-9999px';
@@ -749,31 +803,6 @@ export function renderBoard(rootEl: HTMLElement, initialData: BoardData): void {
   function getColumnIdFromEvent(target: EventTarget | null): string | null {
     const columnEl = target instanceof HTMLElement ? target : null;
     return columnEl?.dataset.columnId ?? null;
-  }
-
-  function showToast(
-    message: string,
-    type: 'info' | 'error' = 'info',
-    duration = 3200,
-    replace = false,
-  ): void {
-    if (replace) {
-      toastHost.querySelectorAll('.toast').forEach((toast) => toast.remove());
-    }
-
-    const toast = document.createElement('div');
-    toast.className = `toast ${type === 'error' ? 'toast--error' : 'toast--info'}`;
-    toast.textContent = message;
-    toastHost.appendChild(toast);
-
-    requestAnimationFrame(() => {
-      toast.classList.add('is-visible');
-    });
-
-    window.setTimeout(() => {
-      toast.classList.remove('is-visible');
-      toast.addEventListener('transitionend', () => toast.remove(), { once: true });
-    }, duration);
   }
 }
 
@@ -805,17 +834,6 @@ function buildBoardState(data: BoardData): BoardState {
     columns,
     taskById,
   };
-}
-
-function ensureToastHost(): HTMLDivElement {
-  let host = document.querySelector<HTMLDivElement>(`#${TOAST_HOST_ID}`);
-  if (!host) {
-    host = document.createElement('div');
-    host.id = TOAST_HOST_ID;
-    host.className = 'toast-container';
-    document.body.appendChild(host);
-  }
-  return host;
 }
 
 function clampNumber(value: number, min: number, max: number): number {

@@ -1,4 +1,5 @@
 import type { PostgrestError } from '@supabase/supabase-js';
+
 import { supabase } from '../auth/supabase';
 
 export interface ProjectRecord {
@@ -24,6 +25,23 @@ export interface TaskRecord {
   description?: string | null;
 }
 
+export interface PomodoroSettingsRecord {
+  project_id: string;
+  owner_id: string;
+  work_minutes: number;
+  short_break_minutes: number;
+  long_break_minutes: number;
+  long_break_every: number;
+}
+
+export interface PomodoroSettingsInput {
+  owner_id: string;
+  work_minutes: number;
+  short_break_minutes: number;
+  long_break_minutes: number;
+  long_break_every: number;
+}
+
 export interface BoardData {
   project: ProjectRecord;
   columns: ColumnRecord[];
@@ -34,6 +52,7 @@ export interface CreateTaskInput {
   projectId: string;
   columnId: string;
   title: string;
+  description?: string;
 }
 
 export interface MoveTaskInput {
@@ -113,7 +132,12 @@ export async function getBoard(projectId: string): Promise<BoardData> {
   };
 }
 
-export async function createTask({ projectId, columnId, title }: CreateTaskInput): Promise<TaskRecord> {
+export async function createTask({
+  projectId,
+  columnId,
+  title,
+  description,
+}: CreateTaskInput): Promise<TaskRecord> {
   const { count, error: countError } = await supabase
     .from('tasks')
     .select('id', { count: 'exact', head: true })
@@ -132,6 +156,7 @@ export async function createTask({ projectId, columnId, title }: CreateTaskInput
       project_id: projectId,
       column_id: columnId,
       title,
+      description: description ?? null,
       position: nextPosition,
     })
     .select('id, project_id, column_id, title, position, description')
@@ -193,6 +218,73 @@ export async function moveTask({
   if (fromColumnId !== toColumnId) {
     await resequenceColumn(projectId, toColumnId, newOrderInTo);
   }
+}
+
+export async function getPomodoroSettings(
+  projectId: string,
+): Promise<PomodoroSettingsRecord | null> {
+  const { data, error } = await supabase
+    .from('pomodoro_settings')
+    .select(
+      'project_id, owner_id, work_minutes, short_break_minutes, long_break_minutes, long_break_every',
+    )
+    .eq('project_id', projectId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw wrapError('Unable to load Pomodoro settings', error);
+  }
+
+  return (data as PomodoroSettingsRecord | null) ?? null;
+}
+
+export async function upsertPomodoroSettings(
+  projectId: string,
+  values: PomodoroSettingsInput,
+): Promise<void> {
+  const payload = {
+    project_id: projectId,
+    ...values,
+  };
+
+  const { error } = await supabase
+    .from('pomodoro_settings')
+    .upsert(payload, { onConflict: 'project_id,owner_id' });
+
+  if (error) {
+    throw wrapError('Unable to save Pomodoro settings', error);
+  }
+}
+
+export async function createStarterProject(ownerId: string): Promise<ProjectRecord> {
+  const projectName = 'My First Board';
+
+  const { data: project, error: projectError } = await supabase
+    .from('projects')
+    .insert({ name: projectName, owner_id: ownerId })
+    .select('id, name, owner_id, created_at')
+    .single();
+
+  if (projectError) {
+    throw wrapError('Unable to create project', projectError);
+  }
+
+  const defaultColumns = ['To do', 'In progress', 'Done'];
+
+  const { error: columnError } = await supabase.from('columns').insert(
+    defaultColumns.map((title, index) => ({
+      project_id: project.id,
+      title,
+      position: index + 1,
+    })),
+  );
+
+  if (columnError) {
+    throw wrapError('Unable to create default columns', columnError);
+  }
+
+  return project as ProjectRecord;
 }
 
 function wrapError(message: string, error: PostgrestError): Error {

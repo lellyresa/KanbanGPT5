@@ -8,7 +8,7 @@ const FOCUSABLE_SELECTORS = [
   'input',
   'select',
   'textarea',
-  '[tabindex]:not([tabindex="-1"])'
+  '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
 export function showLoginModal(options: LoginModalOptions = {}): Promise<string> {
